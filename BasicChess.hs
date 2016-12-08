@@ -24,6 +24,7 @@ data Board = Board {
                      bMap :: BoardMap
                    , bPlayer :: Player
                    , enPassant :: Maybe Square
+                   , kingStatus :: (Bool,Bool)
                    }
 
 type Square = (Word8, Word8)
@@ -32,7 +33,7 @@ type SquareTrans = (Int8, Int8)
 type BoardMap = Map.Map Square PlayerPiece
 
 turnBoard :: Board -> Board
-turnBoard (Board m p _) = Board m (opponent p) Nothing
+turnBoard (Board m p _ k) = Board m (opponent p) Nothing k
 
 bLookup :: Square -> Board -> Maybe PlayerPiece
 bLookup s b = Map.lookup s $ bMap b
@@ -81,9 +82,18 @@ isLegal b (PPiece pl Pawn) s@(h,v) s'@(h',v') =
           _ -> False)
 
 isLegal _ (PPiece _ Knight) _ _  = True
-isLegal b (PPiece _ King  ) s s' = all (emptySq b) (init $ path s s')
+
+isLegal b (PPiece pl King) s s' =
+  case s' |-| s of
+    (h,v) | abs h == 2 ->
+            v == 0 && not (kingHasMoved pl b) && all (emptySq b) (path s s')
+    _ -> all (emptySq b) (init $ path s s')
 
 isLegal b (PPiece _ _     ) s s' = all (emptySq b) (init $ path s s')
+
+kingHasMoved :: Player -> Board -> Bool
+kingHasMoved White = fst . kingStatus
+kingHasMoved Black = snd . kingStatus
 
 sqUnderAttack :: Board -> Player -> Square -> Bool
 sqUnderAttack b pl s = not $ null (attackers :: [PlayerPiece])
@@ -102,14 +112,22 @@ performPly (PPiece pl Pawn) s s' b = do
       then [Rook,Knight,Bishop,Queen]
       else [Pawn]
     return $ mLift (Map.insert s' (PPiece pl pc')) b'
-  where setPassant (Board bm pl' _) = Board bm pl' pass
+  where setPassant (Board bm pl' _ k) = Board bm pl' pass k
         pass = case snd (s' |-| s) of
                  2  -> Just $ s' /-/ (0,1)
                  -2 -> Just $ s' /+/ (0,1)
                  _  -> Nothing
 
+performPly (PPiece pl King) s s' b = [setKingMoved pl $ clearPassant $ movePiece s s' b]
+
 performPly _ s s' b = [clearPassant $ movePiece s s' b]
-  where clearPassant (Board bm pl' _) = Board bm pl' Nothing
+
+setKingMoved :: Player -> Board -> Board
+setKingMoved White (Board bm pl pass (_,k)) = Board bm pl pass (True,k)
+setKingMoved Black (Board bm pl pass (k,_)) = Board bm pl pass (k,True)
+
+clearPassant :: Board -> Board
+clearPassant (Board bm pl _ k) = Board bm pl Nothing k
 
 pcsByPlayer :: Board -> Player -> [(Square,PlayerPiece)]
 pcsByPlayer b pl = do
@@ -161,7 +179,7 @@ onBoard (h,v) | min h v < 1    = False
 -- Basic movements that a piece can make (e.g. a bishop can move diagonally)
 basicTrans :: PlayerPiece -> [SquareTrans]
 basicTrans (PPiece pl pc) = case pc of
-    King     -> [(h,v) | h <- [-1..1], v <- [-1..1], (h,v) /= (0,0)]
+    King     -> [(h,v) | h <- [-2..2], v <- [-1..1], (h,v) /= (0,0)]
     Queen    -> combine [Rook, Bishop]
     Rook     -> [(h,v) | h <- [-8..8], v <- [-8..8], h == 0 || v == 0, (h,v) /= (0,0)]
     Bishop   -> [(h,v) | h <- [-8..8], v <- [-8..8], v == h || h == -v, (h,v) /= (0,0)]
@@ -176,7 +194,7 @@ opponent White = Black
 opponent Black = White
 
 mLift :: (BoardMap -> BoardMap) -> Board -> Board
-mLift f (Board m p e) = Board (f m) p e
+mLift f (Board m p e k) = Board (f m) p e k
 
 occByPl :: Square -> Board -> Bool
 occByPl s b = case bLookup s b of
@@ -202,7 +220,7 @@ infixl 6 /-/
 infixl 6 |-|
 
 initialBoard :: Board
-initialBoard = Board bm White Nothing
+initialBoard = Board bm White Nothing (False,False)
   where bm = Map.fromList [
                    ((1,1), PPiece White Rook   )
                  , ((2,1), PPiece White Knight )

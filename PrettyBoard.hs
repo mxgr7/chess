@@ -27,18 +27,16 @@ prettyBoard board = unlines $ letters:rows
         prettySquare _ _ (Just p) = prettyPieceInverse p
         prettySquare h v _ | (h+v) `mod` 2 == 0 = " "
                            | otherwise          = "▥"
-        letters = unwords $ " " : [l:"" | l <- ['A'..'H']] ++ [show $ enPassant board]
+        letters = unwords $ " " : [l:"" | l <- ['A'..'H']] ++ [show $ enPassant board] ++ [show $ kingStatus board]
 
 putBoard :: Board -> IO ()
 putBoard = putStrLn . prettyBoard 
 
 simpleBoard :: Board
-simpleBoard = Board bm White Nothing
+simpleBoard = Board bm White Nothing (False,False)
   where bm = 
-             Map.insert (1,4) (PPiece White King) .
-             Map.insert (4,4) (PPiece White Pawn) .
-             Map.insert (8,4) (PPiece Black Rook) .
-             Map.insert (2,1) (PPiece Black Rook) .
+             Map.insert (5,1) (PPiece White King) .
+             Map.insert (6,1) (PPiece Black Bishop) .
              Map.insert (8,8) (PPiece Black King) .
              id $ Map.empty
 
