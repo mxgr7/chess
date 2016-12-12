@@ -1,60 +1,59 @@
-module BasicChess where
+module BasicChess ( Player(..)
+                  , Board(..)
+                  , PlayerPiece(..)
+                  , Figurine(..)
+                  , Square(..)
+                  , initialBoard
+                  , legalPlys
+                  ) where
 
 import Data.Int (Int8)
 import Data.Word (Word8)
 import Data.Maybe (isNothing)
+import Control.Monad (guard)
 import qualified Data.Map as Map
 
-bDim :: Word8
-bDim = 8
+data Player = White | Black deriving (Show, Eq)
 
-data Player = White | Black
-              deriving (Show, Eq)
+data Figurine = King | Queen | Rook | Bishop | Knight | Pawn deriving (Show,Eq)
 
-data Piece = Rook | Knight | Bishop | Queen | King | Pawn
-             deriving (Show, Eq)
+data PlayerPiece = PPiece { player :: Player, figurine :: Figurine }
+                   deriving (Show,Eq)
 
-data PlayerPiece = PPiece {
-                     player :: Player
-                   , piece  :: Piece
-                   }
-                   deriving (Show, Eq)
-
-data Board = Board {
-                     bMap :: BoardMap
+data Board = Board { bMap :: BoardMap
                    , bPlayer :: Player
                    , enPassant :: Maybe Square
-                   , kingStatus :: (Bool,Bool)
-                   }
+                   , castling :: ((Bool,Bool),(Bool,Bool))
+                   } deriving (Eq,Show)
 
-type Square = (Word8, Word8)
-type SquareTrans = (Int8, Int8)
+data Square = Sq { sqRank :: Word8, sqFile :: Word8 } deriving (Show,Eq,Ord)
+
+onBoard :: Square -> Bool
+onBoard (Sq r f) = r >= 1 && f >= 1 && r <= 8 && f <= 8
+
+type Move = (Int8,Int8)
 
 type BoardMap = Map.Map Square PlayerPiece
 
 turnBoard :: Board -> Board
-turnBoard (Board m p _ k) = Board m (opponent p) Nothing k
+turnBoard b = b { bPlayer = opponent $ bPlayer b }
 
 bLookup :: Square -> Board -> Maybe PlayerPiece
 bLookup s b = Map.lookup s $ bMap b
 
 legalPlys :: Board -> [Board]
 legalPlys b = do
-  (s,p) <- pcsByPlayer b $ bPlayer b
-  st <- basicTrans p
-  let s' = s /+/ st
-  b' <- if   onBoard s'
-          && not (occByPl s' b)
-          && isLegal b p s s'
-        then performPly p s s' b
-        else []
   let pl = bPlayer b
-  if sqUnderAttack b' (opponent pl) $ kingSq b' pl
-    then []
-    else return b'
+  (s,p) <- pcsByPlayer pl b
+  st    <- basicTrans p
+  s'    <- maybe [] return (s /+/ st)
+  guard $  (not . playerOnSq pl s') b && isLegal p s s' b
+  b'    <- performPly p s s' b
+  guard $  not $ sqUnderAttack (opponent pl) (kingSq pl b') b'
+  return b'
 
-kingSq :: Board -> Player -> Square
-kingSq b pl = (fst . head . Map.toList . Map.filter f) $ bMap b
+kingSq :: Player -> Board -> Square
+kingSq pl b = (fst . head . Map.toList . Map.filter f) $ bMap b
   where f (PPiece pl' King) | pl' == pl = True
         f _ = False
 
@@ -67,9 +66,9 @@ kingSq b pl = (fst . head . Map.toList . Map.filter f) $ bMap b
 --    are legal some of the times).
 -- This function does *not* take into account the "in check" state that results
 -- from the movement.
-isLegal :: Board -> PlayerPiece -> Square -> Square -> Bool
+isLegal :: PlayerPiece -> Square -> Square -> Board -> Bool
 
-isLegal b (PPiece pl Pawn) s@(h,v) s'@(h',v') =
+isLegal (PPiece pl Pawn) s@(Sq h v) s'@(Sq h' v') b =
   (case v'-v of
     2  -> pl == White && v == 2
     -2 -> pl == Black && v == 7
@@ -81,73 +80,87 @@ isLegal b (PPiece pl Pawn) s@(h,v) s'@(h',v') =
           Nothing | enPassant b == Just s' -> True -- En-Passant capture
           _ -> False)
 
-isLegal _ (PPiece _ Knight) _ _  = True
+isLegal (PPiece _ Knight) _ _ _ = True
 
-isLegal b (PPiece pl King) s s' =
+isLegal (PPiece pl King) s s' b =
   case s' |-| s of
-    (h,v) | abs h == 2 ->
-            v == 0 && not (kingHasMoved pl b) && all (emptySq b) (path s s')
-    _ -> all (emptySq b) (init $ path s s')
+    (1,_)  -> all (emptySq b) (init $ path s s')
+    (2,0)  -> canCastleLeft  pl b && all (emptySq b) (path s s{sqFile=7})
+    (-2,0) -> canCastleRight pl b && all (emptySq b) (path s s{sqFile=2})
+    _      -> False
+  where canCastleLeft  White = fst . fst . castling
+        canCastleLeft  Black = fst . snd . castling
+        canCastleRight White = snd . fst . castling
+        canCastleRight Black = snd . snd . castling
 
-isLegal b (PPiece _ _     ) s s' = all (emptySq b) (init $ path s s')
+isLegal (PPiece _ _     ) s s' b = all (emptySq b) (init $ path s s')
 
-kingHasMoved :: Player -> Board -> Bool
-kingHasMoved White = fst . kingStatus
-kingHasMoved Black = snd . kingStatus
-
-sqUnderAttack :: Board -> Player -> Square -> Bool
-sqUnderAttack b pl s = not $ null (attackers :: [PlayerPiece])
+sqUnderAttack :: Player -> Square -> Board -> Bool
+sqUnderAttack pl s b = not $ null (attackers :: [PlayerPiece])
   where attackers = do
-          (s',p) <- pcsByPlayer b pl
+          (s',p) <- pcsByPlayer pl b
           st <- basicTrans p
-          if s' /+/ st == s && isLegal b p s' s
-            then return p
-            else []
+          guard $ s' /+/ st == Just s && isLegal p s' s b
+          return p
 
 performPly :: PlayerPiece -> Square -> Square -> Board -> [Board]
 
 performPly (PPiece pl Pawn) s s' b = do
-    let b' = setPassant $ movePiece s s' b
-    pc' <- if snd s' `elem` [1,8]
+    let b' = setPassant pass $ movePiece s s' b
+    pc' <- if sqFile s' `elem` [1,8]
       then [Rook,Knight,Bishop,Queen]
       else [Pawn]
     return $ mLift (Map.insert s' (PPiece pl pc')) b'
-  where setPassant (Board bm pl' _ k) = Board bm pl' pass k
-        pass = case snd (s' |-| s) of
-                 2  -> Just $ s' /-/ (0,1)
-                 -2 -> Just $ s' /+/ (0,1)
+  where pass = case snd (s' |-| s) of
+                 2  -> s' /-/ (0,1)
+                 -2 -> s' /+/ (0,1)
                  _  -> Nothing
 
-performPly (PPiece pl King) s s' b = [setKingMoved pl $ clearPassant $ movePiece s s' b]
+performPly (PPiece pl King) s s' b = [setCastling (False,False) pl $ mvRook $ movePiece s s' b]
+  where mvRook = case s of
+                   (Sq 5 v) -> 
+                     case s' of
+                       (Sq 7 _) -> insertFrom (Sq 8 v) (Sq 6 v)
+                       (Sq 3 _) -> insertFrom (Sq 1 v) (Sq 4 v)
+                       _ -> id
+                   _ -> id
 
-performPly _ s s' b = [clearPassant $ movePiece s s' b]
+performPly (PPiece pl Rook) s@(Sq 1 _) s' b = [setCastling (False,True) pl $ movePiece s s' b]
+performPly (PPiece pl Rook) s@(Sq 8 _) s' b = [setCastling (True,False) pl $ movePiece s s' b]
 
-setKingMoved :: Player -> Board -> Board
-setKingMoved White (Board bm pl pass (_,k)) = Board bm pl pass (True,k)
-setKingMoved Black (Board bm pl pass (k,_)) = Board bm pl pass (k,True)
+performPly _ s s' b = [movePiece s s' b]
+
+setCastling :: (Bool,Bool) -> Player -> Board -> Board
+setCastling o pl b = b { castling = s pl }
+  where s White = (wc `pairAnd` o,bc)
+        s Black = (wc,bc `pairAnd` o)
+        (wc,bc) = castling b
+        pairAnd (i,j) (i',j') = (i&&i',j&&j')
+
+setPassant :: Maybe Square -> Board -> Board
+setPassant ms b = b { enPassant = ms }
 
 clearPassant :: Board -> Board
-clearPassant (Board bm pl _ k) = Board bm pl Nothing k
+clearPassant = setPassant Nothing
 
-pcsByPlayer :: Board -> Player -> [(Square,PlayerPiece)]
-pcsByPlayer b pl = do
+pcsByPlayer :: Player -> Board -> [(Square,PlayerPiece)]
+pcsByPlayer pl b = do
   (s,p) <- Map.toList $ bMap b
-  if player p == pl
-    then return (s,p)
-    else []
+  guard $ player p == pl
+  return (s,p)
 
 -- Move piece from square s1 to square s2.
 movePiece :: Square -> Square -> Board -> Board
-movePiece s s' = turnBoard . insertFrom s s'
+movePiece s s' = clearPassant . turnBoard . insertFrom s s'
 
 insertFrom :: Square -> Square -> Board -> Board
-insertFrom s s'@(h',v') b = mLift (delPassant . insertMaybe s' p . Map.delete s) b
+insertFrom s s'@(Sq h' v') b = mLift (delPassant . insertMaybe s' p . Map.delete s) b
   where p = Map.lookup s (bMap b)
         delPassant = case p of
           Just (PPiece _ Pawn) -> if enPassant b == Just s'
                                         then case v' of
-                                          3 -> Map.delete (h',4)
-                                          6 -> Map.delete (h',5)
+                                          3 -> Map.delete (Sq h' 4)
+                                          6 -> Map.delete (Sq h' 5)
                                           _ -> id
                                         else id
           _ -> id
@@ -162,22 +175,17 @@ emptySq b s = isNothing $ bLookup s b
 
 -- Path from one square to another, excluding first square.
 path :: Square -> Square -> [Square]
-path (x1,y1) (x2,y2) | x1 == x2 && y1 == y2 = []
-                     | otherwise = let x' | x2 > x1   = x1 + 1
-                                          | x2 < x1   = x1 - 1
-                                          | otherwise = x1
-                                       y' | y2 > y1   = y1 + 1
-                                          | y2 < y1   = y1 - 1
-                                          | otherwise = y1
-                                   in (x',y') : path (x',y') (x2,y2)
-
-onBoard :: Square -> Bool
-onBoard (h,v) | min h v < 1    = False
-              | max h v > bDim = False
-              | otherwise      = True
+path (Sq x1 y1) (Sq x2 y2) | x1 == x2 && y1 == y2 = []
+                           | otherwise = let x' | x2 > x1   = x1 + 1
+                                                | x2 < x1   = x1 - 1
+                                                | otherwise = x1
+                                             y' | y2 > y1   = y1 + 1
+                                                | y2 < y1   = y1 - 1
+                                                | otherwise = y1
+                                         in Sq x' y' : path (Sq x' y') (Sq x2 y2)
 
 -- Basic movements that a piece can make (e.g. a bishop can move diagonally)
-basicTrans :: PlayerPiece -> [SquareTrans]
+basicTrans :: PlayerPiece -> [Move]
 basicTrans (PPiece pl pc) = case pc of
     King     -> [(h,v) | h <- [-2..2], v <- [-1..1], (h,v) /= (0,0)]
     Queen    -> combine [Rook, Bishop]
@@ -194,67 +202,66 @@ opponent White = Black
 opponent Black = White
 
 mLift :: (BoardMap -> BoardMap) -> Board -> Board
-mLift f (Board m p e k) = Board (f m) p e k
+mLift f b = b { bMap = f $ bMap b }
 
-occByPl :: Square -> Board -> Bool
-occByPl s b = case bLookup s b of
-  Just p  -> player p == bPlayer b
+playerOnSq :: Player -> Square -> Board -> Bool
+playerOnSq p s b = case bLookup s b of
+  Just p' -> player p' == p
   _       -> False
 
-(/+/) :: Square -> SquareTrans -> Square
-(h,v) /+/ (ht,vt) = (h',v')
-  where h' = fromIntegral $ fromIntegral h + ht
-        v' = fromIntegral $ fromIntegral v + vt
-infixl 6 /+/
+(/+/) :: Square -> Move -> Maybe Square
+(Sq r f) /+/ (h,v) | onBoard s' = Just s'
+                   | otherwise  = Nothing
+                   where s' = Sq r' f'
+                         r' = fromIntegral $ fromIntegral r + h
+                         f' = fromIntegral $ fromIntegral f + v
 
-(/-/) :: Square -> SquareTrans -> Square
-(h,v) /-/ (h',v') = (ht,vt)
-  where ht = fromIntegral $ fromIntegral h - h'
-        vt = fromIntegral $ fromIntegral v - v'
-infixl 6 /-/
+(/-/) :: Square -> Move -> Maybe Square
+s /-/ (h',v') = s /+/ (-h',-v')
 
-(|-|) :: Square -> Square -> SquareTrans
-(h,v) |-| (h',v') = (ht,vt)
-  where ht = fromIntegral $ fromIntegral h - h'
-        vt = fromIntegral $ fromIntegral v - v'
-infixl 6 |-|
+(|-|) :: Square -> Square -> Move
+(Sq r f) |-| (Sq r' f') = (h,v)
+  where h = fromIntegral $ fromEnum r - fromEnum r'
+        v = fromIntegral $ fromEnum f - fromEnum f'
+
+infixl 6 /+/, /-/, |-|
 
 initialBoard :: Board
-initialBoard = Board bm White Nothing (False,False)
+initialBoard = Board bm White Nothing ((False,False),(False,False))
   where bm = Map.fromList [
-                   ((1,1), PPiece White Rook   )
-                 , ((2,1), PPiece White Knight )
-                 , ((3,1), PPiece White Bishop )
-                 , ((4,1), PPiece White Queen  )
-                 , ((5,1), PPiece White King   )
-                 , ((6,1), PPiece White Bishop )
-                 , ((7,1), PPiece White Knight )
-                 , ((8,1), PPiece White Rook   )
+                   (Sq 1 1, PPiece White Rook   )
+                 , (Sq 2 1, PPiece White Knight )
+                 , (Sq 3 1, PPiece White Bishop )
+                 , (Sq 4 1, PPiece White Queen  )
+                 , (Sq 5 1, PPiece White King   )
+                 , (Sq 6 1, PPiece White Bishop )
+                 , (Sq 7 1, PPiece White Knight )
+                 , (Sq 8 1, PPiece White Rook   )
 
-                 , ((1,2), PPiece White Pawn   )
-                 , ((2,2), PPiece White Pawn   )
-                 , ((3,2), PPiece White Pawn   )
-                 , ((4,2), PPiece White Pawn   )
-                 , ((5,2), PPiece White Pawn   )
-                 , ((6,2), PPiece White Pawn   )
-                 , ((7,2), PPiece White Pawn   )
-                 , ((8,2), PPiece White Pawn   )
+                 , (Sq 1 2, PPiece White Pawn   )
+                 , (Sq 2 2, PPiece White Pawn   )
+                 , (Sq 3 2, PPiece White Pawn   )
+                 , (Sq 4 2, PPiece White Pawn   )
+                 , (Sq 5 2, PPiece White Pawn   )
+                 , (Sq 6 2, PPiece White Pawn   )
+                 , (Sq 7 2, PPiece White Pawn   )
+                 , (Sq 8 2, PPiece White Pawn   )
 
-                 , ((1,7), PPiece Black Pawn   )
-                 , ((2,7), PPiece Black Pawn   )
-                 , ((3,7), PPiece Black Pawn   )
-                 , ((4,7), PPiece Black Pawn   )
-                 , ((5,7), PPiece Black Pawn   )
-                 , ((6,7), PPiece Black Pawn   )
-                 , ((7,7), PPiece Black Pawn   )
-                 , ((8,7), PPiece Black Pawn   )
+                 , (Sq 1 7, PPiece Black Pawn   )
+                 , (Sq 2 7, PPiece Black Pawn   )
+                 , (Sq 3 7, PPiece Black Pawn   )
+                 , (Sq 4 7, PPiece Black Pawn   )
+                 , (Sq 5 7, PPiece Black Pawn   )
+                 , (Sq 6 7, PPiece Black Pawn   )
+                 , (Sq 7 7, PPiece Black Pawn   )
+                 , (Sq 8 7, PPiece Black Pawn   )
 
-                 , ((1,8), PPiece Black Rook   )
-                 , ((2,8), PPiece Black Knight )
-                 , ((3,8), PPiece Black Bishop )
-                 , ((4,8), PPiece Black Queen  )
-                 , ((5,8), PPiece Black King   )
-                 , ((6,8), PPiece Black Bishop )
-                 , ((7,8), PPiece Black Knight )
-                 , ((8,8), PPiece Black Rook   )
+                 , (Sq 1 8, PPiece Black Rook   )
+                 , (Sq 2 8, PPiece Black Knight )
+                 , (Sq 3 8, PPiece Black Bishop )
+                 , (Sq 4 8, PPiece Black Queen  )
+                 , (Sq 5 8, PPiece Black King   )
+                 , (Sq 6 8, PPiece Black Bishop )
+                 , (Sq 7 8, PPiece Black Knight )
+                 , (Sq 8 8, PPiece Black Rook   )
                  ]
